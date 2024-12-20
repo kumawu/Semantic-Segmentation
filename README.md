@@ -52,6 +52,12 @@ Each result shows the:
 
 ## How to Use
 
+### python
+
+
+   ```bash
+   python main.py
+   ```
 ### Prerequisites
 
 Ensure you have Docker installed on your system. You'll also need the files `infer.py` and `colors.txt`, along with the `requirements.txt` file, to run the script locally or in a Docker container.
