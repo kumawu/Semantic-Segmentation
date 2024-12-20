@@ -5,7 +5,7 @@ import os
 import time
 import numpy as np
 import matplotlib.pyplot as plt
-from PIL import Image
+from PIL import Image,ImageDraw
 from scipy.ndimage import binary_fill_holes, label
 from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation
 from skimage.morphology import erosion, disk
@@ -150,6 +150,38 @@ def plot_heatmap_and_save(image, heatmap_resized, top_coords, prompt, index, ori
     plt.savefig(save_path, bbox_inches='tight', pad_inches=0, transparent=True)
     plt.close(fig)
 
+def get_mask_coordinates(mask):
+    """
+    Get coordinates of all regions in the binary mask.
+    
+    Args:
+        mask (np.array): Binary mask.
+    
+    Returns:
+        list: List of coordinates for each region.
+    """
+    coords = np.column_stack(np.where(mask == 1))
+    return [tuple(coord) for coord in coords]
+def create_white_image_with_black_mask(image_size, mask_coords):
+    """
+    Create a white image and draw the mask coordinates in black.
+    
+    Args:
+        image_size (tuple): Size of the image (width, height).
+        mask_coords (list): List of coordinates in the mask.
+    
+    Returns:
+        Image: Image with mask drawn.
+    """
+    # Create a white image
+    white_image = Image.new('RGB', image_size, 'white')
+    draw = ImageDraw.Draw(white_image)
+    
+    # Draw the mask coordinates in black
+    for coord in mask_coords:
+        draw.point(coord, fill='black')
+    
+    return white_image
 
 @timeit
 def apply_sam_and_overlay_masks(image_np, all_coords, prompts, sam_predictor, colors, kernel_size):
@@ -166,7 +198,8 @@ def apply_sam_and_overlay_masks(image_np, all_coords, prompts, sam_predictor, co
     combined_mask = np.zeros((h, w, num_prompts), dtype=np.uint8)
     final_mask = np.zeros((h, w), dtype=np.uint8)
     binary_masks = {}
-    
+    red_overlays = {}
+    image_nps = {}
     for i, (prompt, prompt_coords) in enumerate(zip(prompts, all_coords)):
         if len(prompt_coords) == 0:
             continue 
@@ -176,7 +209,7 @@ def apply_sam_and_overlay_masks(image_np, all_coords, prompts, sam_predictor, co
             "point_labels": [1] * len(prompt_coords)
         }
         
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+        with torch.inference_mode(), torch.autocast("cpu", dtype=torch.bfloat16):
             masks, scores, _ = sam_predictor.predict(**input_prompts)
             
         combined_mask[:, :, i] = np.bitwise_or.reduce(masks.astype(np.uint8), axis=0)
@@ -187,7 +220,14 @@ def apply_sam_and_overlay_masks(image_np, all_coords, prompts, sam_predictor, co
         binary_masks[prompt] = np.where(combined_mask[:, :, i][:, :, np.newaxis], 
                                         (0.5 * red_overlay + 0.5 * image_np).astype(np.uint8), 
                                         0.5 * image_np).astype(np.uint8)
-
+        red_overlays[prompt] = red_overlay
+    
+    # Get coordinates of the mask region
+    mask_coords = get_mask_coordinates(combined_mask[:, :, i])
+    # print(f"Coordinates of the mask region for prompt '{prompt}': {mask_coords}")
+    white_image_with_black_mask = create_white_image_with_black_mask((w, h), mask_coords)
+     
+    # show_combined_mask(combined_mask)
 
     mask_stack = np.repeat(combined_mask[:, :, :, np.newaxis], 3, axis=3)
     color_array = np.array(colors).reshape(1, 1, num_prompts, 3)
@@ -198,7 +238,7 @@ def apply_sam_and_overlay_masks(image_np, all_coords, prompts, sam_predictor, co
     final_overlay = (0.5 * image_np + 0.5 * overlay).astype(np.uint8)
     final_mask = np.argmax(combined_mask, axis=2) + 1
 
-    return final_overlay, final_mask, binary_masks
+    return final_overlay, final_mask, binary_masks,red_overlays,combined_mask
 
 @timeit
 def plot_and_save_final_image(image_np, final_image, save_dir):
@@ -247,11 +287,13 @@ def main(args):
         args.distance_threshold, args.heatmap_threshold, args.selection_method
     )
 
-    final_image, final_mask, binary_masks = apply_sam_and_overlay_masks(
+    final_image, final_mask, binary_masks,red_overlays,combined_mask = apply_sam_and_overlay_masks(
         image_np, all_coords, prompts, sam_predictor, colors, args.kernel_size
     )
+    # print(len(binary_masks['road']))
 
     for result in results:
+        # print(f"Processing image: {result['top_coords']}")
         prompt = result['prompt']
         save_path = os.path.join(args.save_dir, f"output_{prompt}_{image_name}.png")
         plot_heatmap_and_save(
@@ -265,6 +307,26 @@ def main(args):
     Image.fromarray(final_image).save(os.path.join(args.save_dir, args.image_path.split(os.sep)[-1].split('.')[0] + "_segmented.png"))
     Image.fromarray(final_mask.astype(np.uint8)).save(os.path.join(args.save_dir, args.image_path.split(os.sep)[-1].split('.')[0] + "_mask.png"))
     Image.fromarray((heatmap_normalized * 255).astype(np.uint8)).save(os.path.join(args.save_dir, args.image_path.split(os.sep)[-1].split('.')[0] + "_heatmap.png"))
+    return results,final_image,binary_masks,red_overlays,combined_mask
+def detect(args):
+    
+    class Params:
+        def __init__(self, image_path, save_dir, prompts):
+            self.image_path = image_path
+            self.save_dir = save_dir
+            self.prompts = prompts
+            self.seed = 42
+            self.num_points = 40
+            self.distance_threshold = 35
+            self.colors = load_default_colors()
+            self.kernel_size = 3
+            self.heatmap_threshold = 0.8
+            self.selection_method = 'gradient'
+    params = Params(args["image_path"], args["save_dir"], args["prompts"])
+      
+    results,final_image,binary_masks,red_overlays,combined_mask = main(params)
+    return results,final_image,binary_masks,red_overlays,combined_mask
+    
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
